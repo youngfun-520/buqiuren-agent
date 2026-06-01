@@ -1,0 +1,37 @@
+# Environment and local secrets
+.env
+.env.*
+!.env.example
+backend/.env
+frontend/.env.local
+
+# Dependency and virtual environments
+node_modules/
+.venv/
+venv/
+backend/.venv/
+frontend/node_modules/
+
+# Build and cache output
+dist/
+frontend/dist/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+*.tsbuildinfo
+
+# Local runtime logs
+*.log
+*.err.log
+*.out.log
+
+# Local editor/assistant state
+.claude/
+.vscode/
+.idea/
+
+# Local verification screenshots and scratch files
+/*.png
+ux-*.png
+frontend/screenshot*.png
+todo.md
