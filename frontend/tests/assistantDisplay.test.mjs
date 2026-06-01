@@ -45,23 +45,22 @@ const basePayload = {
 };
 
 assert.equal(
-  getAssistantDisplayText(basePayload, { loading: true, liveThinking: '我先确认到你要查的是深圳的居住证办理。' }),
-  '我先确认到你要查的是深圳的居住证办理。',
-);
-
-assert.equal(
   getAssistantDisplayText({
     ...basePayload,
-    timeline: [{ label: '理解你的问题', status: 'done', message: '已理解您要办理居住证' }],
-  }, { loading: true }),
-  '',
+    timeline: [{ label: '理解你的问题', status: 'done', message: '已确认你要办深圳居住证' }],
+  }, { loading: true, liveThinking: '我先确认你要办理的事项。' }),
+  '我先确认你要办理的事项。',
 );
 
 assert.equal(
-  getAssistantDisplayText({ ...basePayload, message: '请问您目前的户籍状态是什么？' }, { loading: false }),
-  '请问您目前的户籍状态是什么？',
+  getAssistantDisplayText(basePayload, { loading: true, liveThinking: '我先确认你要办理的事项。' }),
+  '我先确认你要办理的事项。',
 );
 
-assert.notEqual(getAssistantDisplayText(basePayload, { loading: true }), '已收到。');
+assert.equal(
+  getAssistantDisplayText({ ...basePayload, message: '请问你目前的户籍情况是什么？' }, { loading: false }),
+  '请问你目前的户籍情况是什么？',
+);
+
 assert.equal(getAssistantDisplayText(basePayload, { loading: true }), '');
 assert.equal(getAssistantDisplayText(basePayload, { loading: false }), '');

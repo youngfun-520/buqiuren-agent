@@ -224,6 +224,121 @@ def test_custom_guidance_reply_continues_original_query(monkeypatch):
     assert calls[-1][1]["custom_reply"] == "北京，已退休"
 
 
+def test_guidance_followup_reuses_resolved_service_context(monkeypatch):
+    from app.agent import session as session_mod
+
+    calls: list[tuple[str, dict]] = []
+
+    def fake_stream(raw_query, user_context=None):
+        context = user_context or {}
+        calls.append((raw_query, dict(context)))
+        if len(calls) == 1:
+            yield {
+                "type": "complete",
+                "state": {
+                    "raw_query": raw_query,
+                    "city": "成都",
+                    "service_item_code": "child_medical_insurance_apply",
+                    "service_item_name": "少儿医保参保",
+                    "normalized_query": "成都新生儿医保办理",
+                    "progress_events": [
+                        {"node": "fetch_pages", "status": "warning", "message": "抓取失败"},
+                    ],
+                    "final_response": {
+                        "answer_type": "guidance_fallback",
+                        "message": "请确认宝宝户籍",
+                        "quick_replies_raw": [
+                            {
+                                "label": "宝宝已取得成都户籍",
+                                "value": "成都户籍",
+                                "slot": "household_registration",
+                                "context": {"household_registration": "成都户籍"},
+                            }
+                        ],
+                    },
+                },
+            }
+        else:
+            yield {"type": "complete", "state": _fake_state(raw_query, context)}
+
+    monkeypatch.setattr(session_mod, "run_buqiuren_stream", fake_stream)
+
+    sess = session_mod.BuQiuRenSession()
+    list(sess.ask_stream("成都新生儿医保怎么办理", new_query=True))
+    list(sess.ask_stream("宝宝已取得成都户籍"))
+
+    followup_context = calls[-1][1]
+    assert calls[-1][0] == "成都新生儿医保怎么办理"
+    assert followup_context["household_registration"] == "成都户籍"
+    assert followup_context["_resolved_city"] == "成都"
+    assert followup_context["_resolved_service_item_code"] == "child_medical_insurance_apply"
+    assert followup_context["_context_filled_from_clarification"] is True
+    assert followup_context["_skip_official_retry"] is True
+
+
+def test_initial_state_hydrates_resolved_context_for_followup():
+    from app.agent.workflow import _build_initial_state
+
+    state = _build_initial_state(
+        "成都新生儿医保怎么办理",
+        {
+            "_resolved_city": "成都",
+            "_resolved_service_item_code": "child_medical_insurance_apply",
+            "_resolved_service_item_name": "少儿医保参保",
+            "_resolved_normalized_query": "成都新生儿医保办理",
+            "_resolved_scenario": "办理",
+        },
+    )
+
+    assert state["city"] == "成都"
+    assert state["service_item_code"] == "child_medical_insurance_apply"
+    assert state["service_item_name"] == "少儿医保参保"
+    assert state["normalized_query"] == "成都新生儿医保办理"
+    assert state["scenario"] == "办理"
+    assert state["progress_events"] and state["progress_events"][0]["node"] == "context_reuse"
+
+
+def test_followup_with_cached_service_skips_to_retrieve():
+    from app.agent.workflow import _should_skip_to_retrieve
+
+    state = {
+        "raw_query": "宝宝已取得成都户籍",
+        "user_context": {
+            "_resolved_city": "成都",
+            "_resolved_service_item_code": "child_medical_insurance_apply",
+            "_resolved_service_item_name": "少儿医保参保",
+            "_context_filled_from_clarification": True,
+        },
+        "service_item_code": "child_medical_insurance_apply",
+        "city": "成都",
+    }
+
+    assert _should_skip_to_retrieve(state) == "retrieve_guide"
+
+def test_retrieve_guide_skips_repeated_official_search_after_failed_lookup(monkeypatch):
+    from app.agent import workflow as workflow_mod
+
+    def fail_if_called(state):
+        raise AssertionError("should not repeat official search")
+
+    monkeypatch.setattr(workflow_mod, "search_and_extract_official_guide", fail_if_called)
+
+    state = workflow_mod.retrieve_service_guide(
+        {
+            "raw_query": "成都新生儿医保怎么办理",
+            "city": "成都",
+            "service_item_code": "child_medical_insurance_apply",
+            "service_item_name": "少儿医保参保",
+            "user_context": {"_skip_official_retry": True},
+            "progress_events": [],
+        }
+    )
+
+    assert state["guide_record"] is None
+    assert state["progress_events"][-1]["node"] == "retrieve_guide"
+    assert "暂不重复搜索" in state["progress_events"][-1]["message"]
+
+
 def test_fallback_prompt_includes_known_user_context_and_does_not_force_slot(monkeypatch):
     from app.agent import fallback as fallback_mod
 
@@ -260,6 +375,92 @@ def test_fallback_prompt_includes_known_user_context_and_does_not_force_slot(mon
     assert "不得说缺少城市" in prompt
     assert "公积金缴纳、缴存、提取、查询都属于公共服务" in prompt
     assert '"slot": "fallback_action"' not in prompt
+
+
+def test_newborn_medical_insurance_query_hits_child_service_alias_even_when_semantic_match_is_empty(monkeypatch):
+    from app.agent import workflow as workflow_mod
+
+    def fake_semantic_match(query, records, context=None):
+        return []
+
+    monkeypatch.setattr(workflow_mod, "semantic_match", fake_semantic_match)
+    monkeypatch.setattr(
+        workflow_mod.production_guide_kb,
+        "list_all",
+        lambda: [
+            {
+                "record_key": "child_medical_insurance_apply",
+                "service_item_name": "少儿医保参保",
+                "city": "全国",
+                "review_status": "auto_verified_official",
+                "guide": {
+                    "summary": "办理少儿医保参保",
+                    "conditions": ["新生儿/儿童参保"],
+                    "materials": ["出生证明"],
+                    "methods": ["线上", "线下"],
+                },
+            }
+        ],
+    )
+
+    state = workflow_mod.smart_match_node(
+        {
+            "raw_query": "成都新生儿医保怎么办理",
+            "understanding": {
+                "service_goal": "成都新生儿医保怎么办理",
+                "action_type": "apply",
+                "confidence": 0.2,
+                "slots": {},
+            },
+            "user_context": {"city": "成都"},
+            "city": "成都",
+            "progress_events": [],
+        }
+    )
+
+    assert state["service_item_code"] == "child_medical_insurance_apply"
+    assert state["service_item_name"] == "少儿医保参保"
+
+
+def test_fallback_prompt_deduplicates_known_context_and_trims_repeated_output(monkeypatch):
+    from app.agent import fallback as fallback_mod
+
+    captured: dict[str, str] = {}
+
+    def fake_invoke_json(prompt, default):
+        captured["prompt"] = prompt
+        return {
+            "service_item_name": "少儿医保参保",
+            "message": "成都、成都已知你是本地户口，先补充新生儿信息。成都本地户口的少儿医保参保可继续办理。",
+            "quick_replies": [],
+            "reasoning_summary": "按已知信息继续",
+        }
+
+    monkeypatch.setattr(fallback_mod.llm, "invoke_json", fake_invoke_json)
+
+    result = fallback_mod.build_intelligent_fallback(
+        "成都新生儿医保怎么办理",
+        {
+            "understanding": {"service_goal": "新生儿医保参保", "city": "成都"},
+            "user_context": {
+                "city": "成都",
+                "household_registration": "本地户口",
+                "scenario": "新生儿参保",
+            },
+            "user_slots": {
+                "city": "成都",
+                "household_registration": "本地户口",
+                "scenario": "新生儿参保",
+            },
+        },
+    )
+
+    prompt = captured["prompt"]
+    assert "不要重复这些已知信息" in prompt
+    assert "成都；本地户口；新生儿参保" in prompt
+    assert prompt.count("成都") < 6
+    assert result["message"].count("成都") == 1
+    assert result["message"].count("本地户口") == 1
 
 
 def test_scope_guard_treats_housing_fund_payment_as_public_service_when_llm_misses(monkeypatch):
@@ -317,7 +518,8 @@ def test_search_queries_are_city_aware_without_defaulting_to_shenzhen():
 
     assert all("北京" in q for q in beijing_queries[:4])
     assert not any("深圳" in q for q in generic_queries)
-    assert any("site:gov.cn" in q for q in beijing_queries)
+    assert not any("site:gov.cn" in q for q in beijing_queries)
+    assert any("政务服务网" in q or "人民政府" in q for q in beijing_queries)
 
 
 def test_city_specific_verified_record_is_not_reused_for_other_city():

@@ -67,6 +67,8 @@ class BuQiuRenState(TypedDict, total=False):
     # 语义理解结果
     understanding: Optional[dict[str, Any]]
     semantic_candidates: Optional[list[dict[str, Any]]]
+    # 智能体主动澄清工具
+    clarification_tool_result: Optional[dict[str, Any]]
 
 # =============================================================================
 # 保留：仅用于 prompt 构造，不做业务路由
@@ -103,32 +105,177 @@ SERVICE_ITEMS = {
     "elderly": [{"code":"retirement_apply","name":"退休办理","subjects":["退休"],"scenarios":["办理","申请"],"keywords":["退休办理"],"default_query":"退休 办理 官方 办事指南"}],
 }
 SERVICE_ITEM_INDEX = {item["code"]: item for items in SERVICE_ITEMS.values() for item in items}
-OFFICIAL_DOMAIN_RULES = [
-    {"domain":"gov.cn","name":"政府官方网站"}, {"domain":"gjzwfw.gov.cn","name":"国家政务服务平台"}, {"domain":"www.gov.cn","name":"中国政府网"},
-    {"domain":"mohrss.gov.cn","name":"人力资源和社会保障部"}, {"domain":"nhsa.gov.cn","name":"国家医保局"}, {"domain":"mps.gov.cn","name":"公安部"},
-    {"domain":"mca.gov.cn","name":"民政部"}, {"domain":"moe.gov.cn","name":"教育部"}, {"domain":"mot.gov.cn","name":"交通运输部"},
-    {"domain":"gjj.gov.cn","name":"住房公积金监管服务平台"}, {"domain":"gdzwfw.gov.cn","name":"广东政务服务网"}, {"domain":"sz.gov.cn","name":"深圳政府在线"}, {"domain":"ga.sz.gov.cn","name":"深圳市公安局"},
-    {"domain":"hrss.sz.gov.cn","name":"深圳市人力资源和社会保障局"}, {"domain":"hsa.sz.gov.cn","name":"深圳市医疗保障局"}, {"domain":"zjj.sz.gov.cn","name":"深圳市住房和建设局"},
-    {"domain":"gjj.sz.gov.cn","name":"深圳市住房公积金管理中心"}, {"domain":"mzj.sz.gov.cn","name":"深圳市民政局"}, {"domain":"szeb.sz.gov.cn","name":"深圳市教育局"},
-]
+
+_CHILD_MEDICAL_INSURANCE_ALIAS_HINTS = (
+    "新生儿医保",
+    "婴儿医保",
+    "婴幼儿医保",
+    "宝宝医保",
+    "少儿医保",
+    "儿童医保",
+    "小孩医保",
+    "少儿医疗保险",
+    "儿童医疗保险",
+)
+_CHILD_MEDICAL_INSURANCE_ACTION_HINTS = (
+    "怎么办理",
+    "如何办理",
+    "办理",
+    "参保",
+    "申请",
+    "缴纳",
+    "参保登记",
+    "投保",
+)
+
+
+def _text_contains_any(text: str, hints: tuple[str, ...]) -> bool:
+    return any(hint and hint in text for hint in hints)
+
+
+def _resolve_deterministic_service_alias(state: BuQiuRenState, records: list[dict[str, Any]]) -> dict[str, Any] | None:
+    raw_text = " ".join(
+        str(part).strip()
+        for part in [
+            state.get("raw_query") or "",
+            state.get("normalized_query") or "",
+            (state.get("understanding") or {}).get("service_goal") or "",
+        ]
+        if str(part).strip()
+    )
+    if not raw_text:
+        return None
+
+    if not (
+        _text_contains_any(raw_text, _CHILD_MEDICAL_INSURANCE_ALIAS_HINTS)
+        and _text_contains_any(raw_text, _CHILD_MEDICAL_INSURANCE_ACTION_HINTS)
+    ):
+        return None
+
+    alias_code = "child_medical_insurance_apply"
+    matched = production_guide_kb.get(alias_code)
+    if matched is None:
+        matched = next(
+            (
+                rec
+                for rec in records
+                if isinstance(rec, dict)
+                and (
+                    rec.get("record_key") == alias_code
+                    or rec.get("service_code") == alias_code
+                    or rec.get("service_item_code") == alias_code
+                )
+            ),
+            None,
+        )
+    if not matched:
+        return None
+    return _normalize_record(matched, alias_code)
 
 # =============================================================================
-# 工具函数
+# 万能方案：政府网站可信度校验体系
+# 第1层：域名特征识别（正向匹配，自动通过）
+# 第2层：可信合作方域名（非gov但权威）
+# 第3层：域名黑名单（冒充 gov 的商业网站）
+# 第4层：内容可信度验证（自动标记）
 # =============================================================================
-def now_iso() -> str: return datetime.now(timezone.utc).isoformat()
-def sha256_text(text: str) -> str: return hashlib.sha256((text or "").encode()).hexdigest()
+
+# 第1层：政府域名特征（所有 gov.cn 及子域名全覆盖）
+GOV_DOMAIN_PATTERNS = [
+    r".+\.gov\.cn$",                    # 所有 gov.cn 域名
+    r".+\.gjzwfw\.gov\.cn$",            # 国家政务服务平台
+    r".+\.zwfw\.gov\.cn$",              # 政务服务平台
+    r".+\.gov\.hk$",                    # 香港政府网站
+    r".+\.gov\.mo$",                    # 澳门政府网站
+]
+
+# 第2层：可信合作方（非gov但权威的民生服务平台）
+TRUSTED_PARTNER_DOMAINS = [
+    {"domain": "bendibao.com", "name": "本地宝"},
+    {"domain": "bendibao.cn", "name": "本地宝"},
+    {"domain": "sz.bendibao.com", "name": "深圳本地宝"},
+    {"domain": "gz.bendibao.com", "name": "广州本地宝"},
+    {"domain": "bj.bendibao.com", "name": "北京本地宝"},
+    {"domain": "sh.bendibao.com", "name": "上海本地宝"},
+    {"domain": "hz.bendibao.com", "name": "杭州本地宝"},
+    {"domain": "cd.bendibao.com", "name": "成都本地宝"},
+    {"domain": "wh.bendibao.com", "name": "武汉本地宝"},
+    {"domain": "nj.bendibao.com", "name": "南京本地宝"},
+    {"domain": "cs.bendibao.com", "name": "长沙本地宝"},
+    {"domain": "xa.bendibao.com", "name": "西安本地宝"},
+    {"domain": "jn.bendibao.com", "name": "济南本地宝"},
+    {"domain": "sjz.bendibao.com", "name": "石家庄本地宝"},
+    {"domain": "heb.bendibao.com", "name": "哈尔滨本地宝"},
+    {"domain": "cc.bendibao.com", "name": "长春本地宝"},
+    {"domain": "ty.bendibao.com", "name": "太原本地宝"},
+    {"domain": "dl.bendibao.com", "name": "大连本地宝"},
+    {"domain": "alipay.com", "name": "支付宝"},
+    {"domain": "alipay.cn", "name": "支付宝"},
+    {"domain": "weixin.qq.com", "name": "微信-城市服务"},
+    {"domain": "qq.com", "name": "微信-城市服务"},
+    {"domain": "si12333.cn", "name": "12333人社热线"},
+    {"domain": "gov.cn", "name": "政府官方网站"},  # 兜底
+]
+
+# 第3层：域名黑名单（冒充政府网站的商业域名）
+SUSPICIOUS_PATTERNS = [
+    r"gov.*\.com\.cn$",
+    r"gov.*\.net\.cn$",
+    r"gov.*\.org\.cn$",
+    r".*\.gov\d+\.cn$",
+    r".*政府.*\.com$",
+    r".*政务.*\.com$",
+    r"www\.gov.*\.cn\.com$",
+    r"gov.*\.wang$",
+    r"gov.*\.xyz$",
+    r"gov.*\.top$",
+    r"gov.*\.beer$",
+    r"gov.*\.vip$",
+]
+
 def _domain(url: str) -> str:
     try: return urlparse(url).netloc.lower().split(":")[0]
     except Exception: return ""
+
 def _domain_matches(domain: str, base: str) -> bool: return domain == base or domain.endswith("." + base)
-def is_official_url(url: str) -> bool: return any(_domain_matches(_domain(url), r["domain"]) for r in OFFICIAL_DOMAIN_RULES)
+
+def is_suspicious_domain(domain: str) -> bool:
+    domain = (domain or "").lower()
+    if domain.startswith("gov") and domain.endswith((".com.cn", ".net.cn", ".org.cn", ".wang", ".xyz", ".top", ".beer", ".vip")):
+        return True
+    if domain.startswith("www.gov") and domain.endswith(".cn.com"):
+        return True
+    if ("政府" in domain or "政务" in domain) and domain.endswith(".com"):
+        return True
+    return any(f".gov{digit}.cn" in domain for digit in "0123456789")
+
+def _is_gov_domain(domain: str) -> bool:
+    return any(
+        _domain_matches(domain, suffix)
+        for suffix in ("gov.cn", "gjzwfw.gov.cn", "zwfw.gov.cn", "gov.hk", "gov.mo")
+    )
+
+def is_official_url(url: str) -> bool:
+    domain = _domain(url)
+    if not domain: return False
+    # 先过黑名单
+    if is_suspicious_domain(domain): return False
+    # 第1层：gov 域名特征匹配
+    if _is_gov_domain(domain): return True
+    # 第2层：可信合作方匹配
+    for rule in TRUSTED_PARTNER_DOMAINS:
+        if _domain_matches(domain, rule["domain"]): return True
+    return False
+
 def source_name_for_url(url: str) -> str:
     domain = _domain(url)
-    for rule in sorted(OFFICIAL_DOMAIN_RULES, key=lambda x: len(x["domain"]), reverse=True):
+    # 优先匹配可信合作方
+    for rule in sorted(TRUSTED_PARTNER_DOMAINS, key=lambda x: len(x["domain"]), reverse=True):
         if _domain_matches(domain, rule["domain"]): return rule["name"]
-    if _domain_matches(domain, "gov.cn"):
+    # gov 域名泛匹配
+    if _is_gov_domain(domain):
         return "政府官方网站"
-    return "未知官方来源"
+    return "未知来源"
 
 
 def _record_city(record: dict[str, Any] | None) -> str:
@@ -222,10 +369,58 @@ def understand_user_node(state: BuQiuRenState) -> BuQiuRenState:
     }
 
     # ── Step 1: 城市识别 ──────────────────────────────────────────────
-    try:
-        emit("city_recognition", "正在识别办理城市...")
-        for step in llm.stream思考_gen(
-            f"""用户输入：「{raw}」
+    # 优先用确定性规则：从用户输入中匹配已知城市名（比 LLM 更可靠）
+    known_cities = [
+        "北京","上海","天津","重庆",
+        "深圳","广州","杭州","南京","成都","武汉","西安","苏州",
+        "郑州","长沙","沈阳","青岛","济南","大连","哈尔滨","长春",
+        "福州","厦门","南昌","合肥","昆明","贵阳","南宁","拉萨",
+        "兰州","太原","呼和浩特","石家庄","乌鲁木齐","海口","三亚",
+        "佛山","东莞","珠海","中山","惠州","无锡","常州","宁波",
+        "温州","金华","嘉兴","台州","绍兴","湖州","丽水","衢州","舟山",
+        "深圳","广州","珠海","汕头","韶关","湛江","肇庆","江门","茂名",
+        "深圳","东莞","中山","珠海","佛山","广州",
+        "吉林","长春","吉林市","四平","辽源","通化","白山","松原","白城","延边",
+        "南京","苏州","无锡","常州","镇江","南通","扬州","盐城","徐州","淮安","连云港","泰州","宿迁",
+        "杭州","宁波","温州","嘉兴","湖州","绍兴","金华","衢州","舟山","台州","丽水",
+        "成都","自贡","攀枝花","泸州","德阳","绵阳","广元","遂宁","内江","乐山","南充","眉山","宜宾","广安","达州","雅安","巴中","资阳","阿坝","甘孜","凉山",
+        "武汉","黄石","十堰","宜昌","襄阳","鄂州","荆门","孝感","荆州","黄冈","咸宁","随州","恩施","仙桃","潜江","天门","神农架",
+        "西安","铜川","宝鸡","咸阳","渭南","延安","汉中","榆林","安康","商洛",
+        "长沙","株洲","湘潭","衡阳","邵阳","岳阳","常德","张家界","益阳","郴州","永州","怀化","娄底","湘西",
+        "济南","青岛","淄博","枣庄","东营","烟台","潍坊","济宁","泰安","威海","日照","临沂","德州","聊城","滨州","菏泽",
+        "郑州","开封","洛阳","平顶山","安阳","鹤壁","新乡","焦作","濮阳","许昌","漯河","三门峡","南阳","商丘","信阳","周口","驻马店","济源",
+        "沈阳","大连","鞍山","抚顺","本溪","丹东","锦州","营口","阜新","辽阳","盘锦","铁岭","朝阳","葫芦岛",
+        "哈尔滨","齐齐哈尔","鸡西","鹤岗","双鸭山","大庆","伊春","佳木斯","七台河","牡丹江","黑河","绥化","大兴安岭",
+        "长春","吉林","四平","辽源","通化","白山","松原","白城","延边",
+        "福州","厦门","莆田","三明","泉州","漳州","南平","龙岩","宁德",
+        "南昌","景德镇","萍乡","九江","新余","鹰潭","赣州","吉安","宜春","抚州","上饶",
+        "合肥","芜湖","蚌埠","淮南","马鞍山","淮北","铜陵","安庆","黄山","阜阳","宿州","滁州","六安","宣城","池州","亳州",
+        "昆明","曲靖","玉溪","保山","昭通","丽江","普洱","临沧","楚雄","红河","文山","西双版纳","大理","德宏","怒江","迪庆",
+        "贵阳","六盘水","遵义","安顺","毕节","铜仁","黔西南","黔东南","黔南",
+        "南宁","柳州","桂林","梧州","北海","防城港","钦州","贵港","玉林","百色","贺州","河池","来宾","崇左",
+        "拉萨","日喀则","昌都","林芝","山南","那曲","阿里",
+        "兰州","嘉峪关","金昌","白银","天水","武威","张掖","平凉","酒泉","庆阳","定西","陇南","临夏","甘南",
+        "太原","大同","阳泉","长治","晋城","朔州","晋中","运城","忻州","临汾","吕梁",
+        "呼和浩特","包头","乌海","赤峰","通辽","鄂尔多斯","呼伦贝尔","巴彦淖尔","乌兰察布","兴安","锡林郭勒","阿拉善",
+        "石家庄","唐山","秦皇岛","邯郸","邢台","保定","张家口","承德","沧州","廊坊","衡水",
+        "乌鲁木齐","克拉玛依","吐鲁番","哈密","昌吉","博尔塔拉","巴音郭楞","阿克苏","克孜勒苏","喀什","和田","伊犁","塔城","阿勒泰","石河子","阿拉尔","图木舒克","五家渠","北屯","铁门关","双河","可克达拉","昆玉",
+        "海口","三亚","三沙","儋州",
+        "省本级","省级",
+    ]
+    raw_lower = raw.lower()
+    detected_city = ""
+    for city in known_cities:
+        if city in raw:
+            detected_city = city
+            break
+    if detected_city:
+        understanding["city"] = detected_city
+        emit("city_recognition", f"从输入文本中直接识别到城市：{detected_city}")
+        emit("city_recognition_done", f"已识别到办理城市：{detected_city}", public_status=f"已识别到办理城市：{detected_city}")
+    else:
+        try:
+            for step in llm.stream思考_gen(
+                f"""用户输入：「{raw}」
 已知上下文：{json.dumps(ctx, ensure_ascii=False)}
 请判断用户想办理哪个城市的政务服务。
 
@@ -238,22 +433,27 @@ def understand_user_node(state: BuQiuRenState) -> BuQiuRenState:
 - public_status 不展示推理过程、规则、模型内部判断。
 
 只返回 JSON，不要其他文字。""",
-        ):
-            if not step.get("done"):
-                emit("city_recognition", f"正在分析城市：{step['thinking']}")
-            else:
-                city_result = step.get("result", {})
-                city = city_result.get("city", "")
-                confidence = city_result.get("city_confidence", 0)
-                if confidence >= 0.3 and city:
-                    understanding["city"] = city
+            ):
+                if not step.get("done"):
+                    emit("city_recognition", f"正在分析城市：{step['thinking']}")
                 else:
-                    understanding["city"] = ""  # 未识别到明确城市
-                public_status = (city_result.get("public_status") or "").strip()
-                if public_status:
-                    emit("city_recognition_done", public_status, public_status=public_status)
-    except Exception as exc:
-        emit("city_recognition_error", f"城市识别异常：{exc}")
+                    city_result = step.get("result", {})
+                    city = city_result.get("city", "")
+                    confidence = city_result.get("city_confidence", 0)
+                    existing_city = (state.get("user_context") or {}).get("city")
+                    if confidence >= 0.3 and city:
+                        understanding["city"] = city
+                    elif existing_city:
+                        understanding["city"] = existing_city
+                    elif city:
+                        understanding["city"] = city
+                    else:
+                        understanding["city"] = ""
+                    public_status = (city_result.get("public_status") or "").strip()
+                    if public_status:
+                        emit("city_recognition_done", public_status, public_status=public_status)
+        except Exception as exc:
+            emit("city_recognition_error", f"城市识别异常：{exc}")
 
     # ── Step 2: 事项识别 ─────────────────────────────────────────────
     city_for_prompt = understanding["city"] or "未明确"
@@ -391,6 +591,7 @@ def smart_match_node(state: BuQiuRenState) -> BuQiuRenState:
     records = production_guide_kb.list_all()
     candidates = semantic_match(understanding, records, context=ctx)
     top_score = candidates[0].get("score", 0) if candidates else 0
+    alias_record = _resolve_deterministic_service_alias(state, records)
 
     # 根据 understanding confidence 调整阈值
     if u_confidence >= 0.7:
@@ -440,10 +641,35 @@ def smart_match_node(state: BuQiuRenState) -> BuQiuRenState:
                 ],
             }
 
+    if alias_record:
+        service_name = alias_record.get("service_item_name") or "少儿医保参保"
+        record_city = _record_city(alias_record)
+        user_city = state.get("city") or understanding.get("city") or ""
+
+        if q is not None:
+            try:
+                q.put_nowait({"node": "smart_match", "thinking": f"发现「{service_name}」相关指南，采用确定性别名命中", "status": "thinking"})
+            except queue.Full:
+                pass
+
+        return {
+            **state,
+            "service_item_code": alias_record.get("service_code") or alias_record.get("service_item_code") or "child_medical_insurance_apply",
+            "service_item_name": service_name,
+            "guide_record": alias_record if _city_matches(user_city, record_city) else None,
+            "semantic_candidates": candidates,
+            "life_event_category": cat,
+            "life_event_name": name,
+            "progress_events": state.get("progress_events", []) + [
+                {"node": "smart_match", "status": "done", "message": "正在查询知识库...", "data": {"thinking": f"通过确定性别名命中「{service_name}」"}},
+                {"node": "smart_match_done", "status": "done", "message": f"找到了！事项：{service_name}", "data": {"thinking": "别名命中后继续进入后续检索"}},
+            ],
+        }
+
     return {
         **state,
         "service_item_code": "unknown",
-        "service_item_name": "未识别",
+        "service_item_name": candidates[0].get("record", {}).get("service_item_name", "未识别") if candidates else "未识别",
         "semantic_candidates": candidates,
         "life_event_category": cat,
         "life_event_name": name,
@@ -489,6 +715,20 @@ def check_integrity_node(state: BuQiuRenState) -> BuQiuRenState:
             except queue.Full:
                 pass
 
+    # ── 如果城市已识别且事项已匹配，跳过 LLM 追问，直接进入 retrieve_guide ──
+    if state.get("city") and state.get("service_item_code") and code != "unknown":
+        emit("check_integrity", "城市和事项均已识别，信息完整，进入检索指南。")
+        return {
+            **state,
+            "need_clarification": False,
+            "missing_slots": [],
+            "clarification_question": "",
+            "progress_events": state.get("progress_events", []) + [
+                {"node": "check_integrity", "status": "done", "message": "城市和事项均已识别，信息完整"},
+                {"node": "check_integrity_done", "status": "done", "message": "进入检索指南"},
+            ],
+        }
+
     # ── 如果用户刚回答了追问（user_context 中有来自上一轮 missing_slots 的值），直接认为信息完整 ──
     last_clarification = (state.get("user_context") or {}).get("_last_clarification_slots") or []
     if last_clarification:
@@ -520,9 +760,27 @@ def check_integrity_node(state: BuQiuRenState) -> BuQiuRenState:
 
     emit("check_integrity", "正在检查信息完整性...")
 
-    # 从 guide 提取必须项，然后让 LLM 判断用户已提供哪些
+    # 优先判断 guide_record 本身是否已完整（从 MCP 搜索得到的内容）
+    # 如果 conditions/materials/methods 都有实质内容，直接认为信息完整，跳过 LLM 追问
+    if required_fields and all(guide.get(key) for key in required_fields):
+        # guide 已有完整内容，直接生成卡片，不走追问
+        emit("check_integrity", "官方指南已包含完整信息，直接生成办事卡片。")
+        return {
+            **state,
+            "need_clarification": False,
+            "missing_slots": [],
+            "clarification_question": "",
+            "progress_events": state.get("progress_events", []) + [
+                {"node": "check_integrity", "status": "done", "message": "官方指南已包含完整条件、材料和办理方式"},
+                {"node": "check_integrity_done", "status": "done", "message": "信息完整，可以生成指南"},
+            ],
+        }
+    from datetime import datetime, timezone
+    now_str = datetime.now(timezone.utc).strftime("%Y年%m月%d日")
     if required_fields:
         prompt_required = f"""事项名称：{item_name}
+【重要】当前日期：{now_str}。你在判断信息完整性时，必须假设当前是{now_str}，不得引用已过时（2024年及以前）的政策信息。如果某项政策的时间节点不确定，请注明"请以官方最新发布为准"。
+
 已知用户信息：{json.dumps(slots, ensure_ascii=False)}
 
 该事项的办事指南包含以下关键信息类别：{required_fields}
@@ -535,6 +793,8 @@ def check_integrity_node(state: BuQiuRenState) -> BuQiuRenState:
 如果信息完整足够，返回 {{"complete": true, "public_status": "一句给用户看的阶段输出，只描述正在整理后续指南", "missing_slots": []}}。"""
     else:
         prompt_required = f"""事项名称：{item_name}
+【重要】当前日期：{now_str}。你在判断信息完整性时，必须假设当前是{now_str}，不得引用已过时（2024年及以前）的政策信息。
+
 已知用户信息：{json.dumps(slots, ensure_ascii=False)}
 
 请判断用户已提供的信息是否足够回答办事指南问题。如果不够，一次只问一个最关键的问题，并为这个问题生成 2 到 5 个可选回复；选项数量和内容由你根据事项、城市和上下文决定。
@@ -578,6 +838,50 @@ def check_integrity_node(state: BuQiuRenState) -> BuQiuRenState:
     }
 
 # =============================================================================
+# 智能体主动澄清工具（Agent Tool）
+# 智能体在任何节点发现信息不完整时，可主动调用此工具弹出澄清框
+# 主动调用 + 被动 check_integrity，双模式更灵活
+# =============================================================================
+def clarification_tool(state: BuQiuRenState) -> BuQiuRenState:
+    """
+    主动澄清工具：智能体在流程中任何阶段发现信息缺失，
+    都可以调用此工具生成追问选项，返回给用户选择，
+    并将选择结果注入 user_context，继续流程。
+
+    触发方式：在任意节点返回 state 时，
+    设置 clarification_tool_result = {"missing_slots": [...], "triggered_by": "节点名"}
+    即会自动进入本工具处理流程。
+    """
+    tool_result = state.get("clarification_tool_result")
+    if not tool_result:
+        return state  # 未触发工具，原样返回
+
+    missing_slots = tool_result.get("missing_slots", [])
+    if not missing_slots:
+        # 工具触发了但没有选项，说明信息已足够
+        return {
+            **state,
+            "clarification_tool_result": None,
+            "need_clarification": False,
+            "missing_slots": [],
+            "progress_events": state.get("progress_events", []) + [
+                {"node": "clarification_tool", "status": "done", "message": "信息已完整，无需追问"},
+            ],
+        }
+
+    # 返回追问状态，build_response_node 会将 missing_slots 组装为 clarification_required
+    return {
+        **state,
+        "clarification_tool_result": None,
+        "need_clarification": True,
+        "missing_slots": missing_slots,
+        "clarification_question": tool_result.get("question", missing_slots[0].get("question", "")),
+        "progress_events": state.get("progress_events", []) + [
+            {"node": "clarification_tool", "status": "done", "message": f"主动调用澄清工具，追问：{missing_slots[0].get('question', '')}"},
+        ],
+    }
+
+# =============================================================================
 # 检索服务指南
 # =============================================================================
 def retrieve_service_guide(state: BuQiuRenState) -> BuQiuRenState:
@@ -586,6 +890,16 @@ def retrieve_service_guide(state: BuQiuRenState) -> BuQiuRenState:
         return {**state, "guide_record": None}
 
     city = (state.get("city") or "").strip()
+    if (state.get("user_context") or {}).get("_skip_official_retry") and not state.get("guide_record"):
+        return {
+            **state,
+            "guide_record": None,
+            "progress_events": state.get("progress_events", []) + [
+                {"node": "retrieve_guide", "status": "warning", "message": "已复用上次官方检索结果，暂不重复搜索", "data": {"thinking": "上一轮官方检索未能抓取有效页面，本轮只根据新增信息继续引导"}},
+            ],
+        }
+
+    # Step 1：优先从 KB 查，只有通过人工审核（human_reviewed）或系统自动核验（auto_verified_official）的记录才直接返回
     existing = production_guide_kb.get(f"{_base_service_code(code)}:{city}") if city else None
     existing = existing or production_guide_kb.get(code) or production_guide_kb.get(_base_service_code(code))
     if (
@@ -603,20 +917,38 @@ def retrieve_service_guide(state: BuQiuRenState) -> BuQiuRenState:
             ],
         }
 
-    # MCP-only 搜索
-    try:
-        updated = search_and_extract_official_guide(state)
-        if updated.get("guide_record"):
-            return updated
-    except Exception as exc:
-        return {
-            **state,
-            "guide_record": None,
-            "progress_events": state.get("progress_events", []) + [
-                {"node": "retrieve_guide", "status": "warning", "message": "实时检索暂不可用", "data": {"thinking": "网络检索暂不可用"}},
-            ],
-        }
-    return {**state, "guide_record": None}
+    # Step 2：KB 没有命中 → 调用 MCP 搜索官方指南
+    import threading
+    import queue
+
+    def _do_mcp_search():
+        try:
+            result = search_and_extract_official_guide(state)
+            # 将搜索结果写入 state（通过 shared queue 或全局变量）
+            _mcp_result_holder[0] = result
+        except Exception as exc:
+            _mcp_result_holder[0] = {**state, "guide_record": None, "error": str(exc)}
+
+    _mcp_result_holder = [None]
+    t = threading.Thread(target=_do_mcp_search, daemon=True)
+    t.start()
+    search_timeout = min(
+        180,
+        max(30, CONFIG.firecrawl_mcp_timeout_seconds * (1 + max(1, CONFIG.max_fetch_pages)) + 20),
+    )
+    t.join(timeout=search_timeout)
+
+    mcp_result = _mcp_result_holder[0]
+    if mcp_result:
+        return mcp_result
+
+    return {
+        **state,
+        "guide_record": None,
+        "progress_events": state.get("progress_events", []) + [
+            {"node": "retrieve_guide", "status": "warning", "message": "搜索超时或失败", "data": {"thinking": "MCP 搜索未返回结果"}},
+        ],
+    }
 
 def build_search_queries(code: str | None, normalized_query: str | None, city: str | None = None) -> list[str]:
     item = SERVICE_ITEM_INDEX.get(_base_service_code(code), {})
@@ -625,13 +957,12 @@ def build_search_queries(code: str | None, normalized_query: str | None, city: s
     city = (city or "").strip()
     city_base = f"{city} {base}".strip()
     city_name = f"{city} {name}".strip()
-    primary_query = city_base if ("官方" in base or "办理指南" in base) else f"{city_base} 官方 办理指南"
+    # 去掉 site:gov.cn（Firecrawl MCP 不支持此语法），改用通用查询让 is_official_url 过滤
     return [q for q in [
-        primary_query,
-        f"{city_name} 政务服务网 办理",
-        f"{city_name} 人民政府 办理",
-        f"site:gov.cn {city_name} 办理",
-        f"国家政务服务平台 {city_name} 办理",
+        f"{city_base} 官方 办理指南",
+        f"{city_name} 本地宝",
+        f"{city_name} 政务服务网",
+        f"{city_name} 人民政府",
     ] if q.strip()]
 
 def _clean_html_to_text(html: str) -> tuple[str, str]:
@@ -653,7 +984,7 @@ def fetch_url_text(url: str) -> dict[str, Any]:
     if not text:
         raise SearchProviderError("Firecrawl MCP 未返回可用页面正文")
     return {
-        "url": url, "title": title, "text": _collapse_blank_lines(text)[:50000],
+        "url": url, "title": title, "text": _collapse_blank_lines(text)[:8000],
         "source_name": source_name_for_url(url), "fetched_at": now_iso(),
         "content_hash": sha256_text(text), "provider": "firecrawl_mcp",
     }
@@ -684,7 +1015,7 @@ def search_and_extract_official_guide(state: BuQiuRenState) -> BuQiuRenState:
     if not pages:
         return {**state, "progress_events": progress, "guide_record": None}
 
-    prompt_pages = "\n\n".join([f"标题：{p['title']}\nURL：{p['url']}\n正文：{p['text'][:12000]}" for p in pages])
+    prompt_pages = "\n\n".join([f"标题：{p['title']}\nURL：{p['url']}\n正文：{p['text'][:4000]}" for p in pages])
     prompt = f"""你是"不求人"的官方办事指南抽取节点。只能根据页面正文抽取"办事指南"，不得编造。只返回 JSON，字段：is_relevant, service_item_name, summary, conditions, materials, methods, steps, online_entry, offline_locations, processing_time, fees, tips, source_urls, confidence, missing_fields。\n用户问题：{state.get('raw_query')}\n官方页面：\n{prompt_pages}"""
 
     try:
@@ -703,14 +1034,20 @@ def search_and_extract_official_guide(state: BuQiuRenState) -> BuQiuRenState:
         "service_item_name": state.get("service_item_name"),
         "city": state.get("city") or "",
         "guide": guide, "sources": sources,
-        "fetched_at": now_iso(), "reviewed_at": now_iso(),
-        "review_status": "auto_verified_official",
+        "fetched_at": now_iso(), "reviewed_at": None,
+        "review_status": "pending_user_review",  # MCP 搜索结果需用户确认后才能入库
         "provider": "firecrawl_mcp",
+        "content_hash": sha256_text(json.dumps(guide, ensure_ascii=False)),
     }
     save_key = _base_service_code(state.get("service_item_code")) or "unknown"
     if state.get("city"):
         save_key = f"{save_key}:{state.get('city')}"
-    production_guide_kb.upsert(save_key, record)
+    # 去重：如果已存在 pending_review 或 human_reviewed 的同 city+code 记录，不覆盖（防止重复搜索）
+    existing = production_guide_kb.get(save_key)
+    if existing and existing.get("review_status") in ["human_reviewed", "auto_verified_official"]:
+        pass  # 已有人工审核通过的正式记录，不覆盖
+    else:
+        production_guide_kb.upsert(save_key, record)
     progress.extend([
         {"node": "extract_guide", "status": "done", "message": "正在整理办事指南...", "data": {"thinking": "从官方页面提取关键办事信息"}},
         {"node": "extract_guide_done", "status": "done", "message": "已生成办事指南", "data": {"thinking": "指南整理完成，可查看详情"}},
@@ -751,6 +1088,7 @@ def build_response_node(state: BuQiuRenState) -> BuQiuRenState:
         if record:
             guide = record.get("guide") or {}
             freshness = calculate_freshness(record.get("fetched_at"))
+            is_pending = record.get("review_status") == "pending_user_review"
             card = {
                 "title": f"{state.get('city', '')}{state.get('service_item_name', '')}指南",
                 "summary": guide.get("summary") or "",
@@ -770,17 +1108,27 @@ def build_response_node(state: BuQiuRenState) -> BuQiuRenState:
                 "fetched_at": record.get("fetched_at"),
                 "reviewed_at": record.get("reviewed_at"),
                 "freshness": freshness,
+                "review_status": record.get("review_status"),
                 "disclaimer": "办事政策可能调整，请以官方最新页面为准。",
             }
-            resp = {"answer_type": "service_card", "message": "已为你生成办事指南。", "card": card, "progress_events": progress}
+            if is_pending:
+                # 待用户确认的指南：展示卡片同时让用户决定是否入库
+                resp = {
+                    "answer_type": "pending_user_review",
+                    "message": "以下是根据官方页面为你生成的办事指南，请确认信息是否准确：",
+                    "card": card,
+                    "quick_replies": [
+                        {"label": "信息准确，存入知识库", "value": "confirm_guide", "slot": "_user_review", "context": {"_user_review": "confirm"}},
+                        {"label": "信息有误", "value": "reject_guide", "slot": "_user_review", "context": {"_user_review": "reject"}},
+                    ],
+                    "progress_events": progress,
+                }
+            else:
+                resp = {"answer_type": "service_card", "message": "已为你生成办事指南。", "card": card, "progress_events": progress}
         else:
-            resp = {
-                "answer_type": "no_verified_guide",
-                "message": "暂未找到可验证的官方办事指南，因此不生成可能误导你的答案。建议稍后再试或前往官方渠道确认。",
-                "service_item_code": state.get("service_item_code"),
-                "service_item_name": state.get("service_item_name"),
-                "progress_events": progress,
-            }
+            from app.agent.fallback import build_intelligent_fallback as _bif
+            fb = _bif(state.get("raw_query") or "", state)
+            resp = {**fb, "progress_events": progress + fb.get("progress_events", [])}
 
     return {
         **state,
@@ -798,6 +1146,15 @@ def build_response_node(state: BuQiuRenState) -> BuQiuRenState:
 # 流式 thinking 共享 queue（通过 threading.local 传递，避免全局变量冲突）
 _stream_thinking_queue: "queue.Queue | None" = None
 
+def _should_skip_to_retrieve(state):
+    ctx = state.get("user_context") or {}
+    has_cached_service = state.get("service_item_code") not in [None, "", "unknown"]
+    if not has_cached_service:
+        return "understand_user"
+    if ctx.get("_context_filled_from_clarification") or ctx.get("_resolved_service_item_code"):
+        return "retrieve_guide"
+    return "understand_user"
+
 def build_graph():
     if StateGraph is None:
         raise ImportError("langgraph is required but not installed")
@@ -807,31 +1164,77 @@ def build_graph():
     builder.add_node("check_integrity", check_integrity_node)
     builder.add_node("retrieve_guide", retrieve_service_guide)
     builder.add_node("build_response", build_response_node)
-    builder.add_edge(START, "understand_user")
+    builder.add_node("clarification_tool", clarification_tool)
+    builder.add_conditional_edges(START, _should_skip_to_retrieve, {"understand_user": "understand_user", "retrieve_guide": "retrieve_guide"})
     builder.add_edge("understand_user", "smart_match")
     builder.add_conditional_edges(
         "smart_match",
         lambda s: "build_response" if s.get("service_item_code") in [None, "unknown"] else "check_integrity",
         {"build_response": "build_response", "check_integrity": "check_integrity"},
     )
+    # check_integrity 优先判断是否主动触发了 clarification_tool
     builder.add_conditional_edges(
         "check_integrity",
-        lambda s: "build_response" if s.get("need_clarification") else "retrieve_guide",
-        {"build_response": "build_response", "retrieve_guide": "retrieve_guide"},
+        lambda s: "clarification_tool" if s.get("clarification_tool_result") else ("build_response" if s.get("need_clarification") else "retrieve_guide"),
+        {"clarification_tool": "clarification_tool", "build_response": "build_response", "retrieve_guide": "retrieve_guide"},
     )
+    # clarification_tool 处理完后直接去 build_response
+    builder.add_edge("clarification_tool", "build_response")
     builder.add_edge("retrieve_guide", "build_response")
     builder.add_edge("build_response", END)
     return builder.compile()
 
 graph = build_graph()
 
-def run_buqiuren(raw_query: str, user_context: dict[str, Any] | None = None) -> dict[str, Any]:
+def _build_initial_state(raw_query: str, user_context: dict[str, Any] | None = None) -> BuQiuRenState:
+    ctx = user_context or {}
     initial: BuQiuRenState = {
         "raw_query": raw_query,
-        "user_context": user_context or {},
+        "user_context": ctx,
         "progress_events": [],
         "debug_traces": [],
     }
+    cached_fields = {
+        "_resolved_city": "city",
+        "_resolved_service_item_code": "service_item_code",
+        "_resolved_service_item_name": "service_item_name",
+        "_resolved_normalized_query": "normalized_query",
+        "_resolved_life_event_category": "life_event_category",
+        "_resolved_life_event_name": "life_event_name",
+        "_resolved_scenario": "scenario",
+    }
+    reused_bits: list[str] = []
+    for context_key, state_key in cached_fields.items():
+        value = ctx.get(context_key)
+        if value:
+            initial[state_key] = value
+            if state_key == "city":
+                reused_bits.append(f"城市：{value}")
+            elif state_key == "service_item_name":
+                reused_bits.append(f"事项：{value}")
+            elif state_key == "scenario":
+                reused_bits.append(f"场景：{value}")
+    if isinstance(ctx.get("_resolved_understanding"), dict):
+        initial["understanding"] = ctx["_resolved_understanding"]
+        goal = ctx["_resolved_understanding"].get("service_goal")
+        if goal:
+            reused_bits.append(f"目标：{goal}")
+    if isinstance(ctx.get("_resolved_guide_record"), dict):
+        initial["guide_record"] = ctx["_resolved_guide_record"]
+        reused_bits.append("已命中本地核验指南")
+    if reused_bits:
+        initial["progress_events"].append(
+            {
+                "node": "context_reuse",
+                "status": "done",
+                "message": "已复用上轮识别结果",
+                "data": {"thinking": "；".join(reused_bits)},
+            }
+        )
+    return initial
+
+def run_buqiuren(raw_query: str, user_context: dict[str, Any] | None = None) -> dict[str, Any]:
+    initial = _build_initial_state(raw_query, user_context)
     try:
         return graph.invoke(initial)
     except Exception as exc:
@@ -857,14 +1260,9 @@ def run_buqiuren_stream(raw_query: str, user_context: dict[str, Any] | None = No
     result_holder = [None]
     stream_holder = [None]
 
-    initial: BuQiuRenState = {
-        "raw_query": raw_query,
-        "user_context": user_context or {},
-        "progress_events": [],
-        "debug_traces": [],
-        # 注意：不传 _thinking_queue，因为 LangGraph 不会把它传给节点状态
-        # 节点通过全局 _stream_thinking_queue 访问 queue
-    }
+    initial = _build_initial_state(raw_query, user_context)
+    # 注意：不传 _thinking_queue，因为 LangGraph 不会把它传给节点状态
+    # 节点通过全局 _stream_thinking_queue 访问 queue
 
     def run_graph():
         try:

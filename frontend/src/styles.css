@@ -441,13 +441,18 @@ body {
   text-transform: uppercase;
   letter-spacing: 0.04em;
 }
-.timeline { list-style: none; display: flex; flex-direction: column; gap: 0; }
+.timeline {
+  list-style: none;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
 .timeline li {
   display: grid;
-  grid-template-columns: 20px 1fr;
+  grid-template-columns: 18px 1fr;
   gap: 10px;
   align-items: start;
-  padding: 6px 0;
+  padding: 5px 0;
   position: relative;
   font-size: 13px;
   line-height: 1.5;
@@ -456,16 +461,16 @@ body {
 .timeline li::before {
   content: '';
   position: absolute;
-  left: 9px;
-  top: 22px;
-  bottom: -6px;
+  left: 8px;
+  top: 20px;
+  bottom: -4px;
   width: 2px;
   background: var(--line);
 }
 .timeline li:last-child::before { display: none; }
 .tick {
-  width: 20px;
-  height: 20px;
+  width: 18px;
+  height: 18px;
   border-radius: 50%;
   background: rgba(79, 115, 255, 0.08);
   border: 2px solid #4f73ff;
@@ -475,9 +480,43 @@ body {
   position: relative;
   z-index: 1;
   flex-shrink: 0;
+  font-size: 11px;
+  line-height: 1;
 }
 .tick::after { content: ''; width: 7px; height: 7px; border-radius: 50%; background: #4f73ff; }
-.timeline li strong { color: var(--text); font-weight: 600; margin-right: 4px; }
+.timeline-text {
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.timeline-message {
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.45;
+  overflow-wrap: anywhere;
+}
+.timeline li strong {
+  color: var(--text);
+  font-weight: 650;
+  margin-right: 0;
+  display: block;
+}
+.timeline-item--thinking .timeline-message {
+  color: #5b6880;
+  font-weight: 500;
+}
+.timeline-item--compact {
+  padding-top: 3px;
+  padding-bottom: 3px;
+}
+.timeline-item--compact .timeline-message {
+  font-size: 11.5px;
+  line-height: 1.4;
+}
+.timeline-item--compact .tick {
+  background: rgba(79, 115, 255, 0.06);
+}
 
 /* Final Answer */
 .final-answer { padding: 16px 20px; }
@@ -729,6 +768,8 @@ body {
   .faq-item { min-height: 72px; border-radius: 27px; }
   .faq-item span { font-size: 18px; }
   .card-grid { grid-template-columns: 1fr; }
+  .timeline li { gap: 8px; }
+  .timeline-message { font-size: 11px; }
 }
 
 @media (min-width: 942px) {

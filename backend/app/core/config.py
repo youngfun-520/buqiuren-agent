@@ -25,8 +25,8 @@ class AppConfig:
     firecrawl_mcp_timeout_seconds: int = int(os.getenv("FIRECRAWL_MCP_TIMEOUT_SECONDS", "60"))
 
     request_timeout_seconds: int = int(os.getenv("REQUEST_TIMEOUT_SECONDS", "15"))
-    max_search_results: int = int(os.getenv("MAX_SEARCH_RESULTS", "8"))
-    max_fetch_pages: int = int(os.getenv("MAX_FETCH_PAGES", "4"))
+    max_search_results: int = int(os.getenv("MAX_SEARCH_RESULTS", "6"))
+    max_fetch_pages: int = int(os.getenv("MAX_FETCH_PAGES", "1"))
     guide_freshness_days: int = int(os.getenv("GUIDE_FRESHNESS_DAYS", "30"))
     guide_expiry_days: int = int(os.getenv("GUIDE_EXPIRY_DAYS", "90"))
     http_user_agent: str = os.getenv("HTTP_USER_AGENT", "BuQiuRenBot/1.0")

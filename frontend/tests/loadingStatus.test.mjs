@@ -22,6 +22,6 @@ vm.runInNewContext(outputText, context);
 const { getLoadingStatusText } = context.exports;
 
 assert.equal(getLoadingStatusText('正在识别办理城市...'), '正在识别办理城市...');
-assert.equal(getLoadingStatusText('  正在匹配办理事项  '), '正在匹配办理事项');
+assert.equal(getLoadingStatusText('  正在匹配官方指南  '), '正在匹配官方指南');
 assert.equal(getLoadingStatusText(''), '');
 assert.equal(getLoadingStatusText(undefined), '');

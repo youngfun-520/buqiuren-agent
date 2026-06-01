@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import json
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
 from typing import Any
 from uuid import uuid4
 
@@ -19,6 +20,7 @@ PROGRESS_LABELS = {
     "smart_match":"匹配办理事项",
     "check_integrity":"确认信息完整性",
     "retrieve_guide":"搜索官方指南",
+    "context_reuse":"复用已知信息",
     "build_response":"生成办事指南",
     # 保留旧节点标签用于向后兼容（已有会话历史）
     "understand_user_query":"理解你的问题",
@@ -219,6 +221,7 @@ INTERACTIVE_RESPONSE_TYPES = {
     "clarification",
     "guidance_fallback",
     "agent_task_guidance",
+    "pending_user_review",
 }
 
 
@@ -238,6 +241,41 @@ class BuQiuRenSession:
     last_state: dict[str, Any] | None = None
     last_clarification_response: dict[str, Any] | None = None
 
+    def _remember_resolved_state(self, state: dict[str, Any] | None) -> None:
+        if not isinstance(state, dict):
+            return
+        mapping = {
+            "city": "_resolved_city",
+            "service_item_code": "_resolved_service_item_code",
+            "service_item_name": "_resolved_service_item_name",
+            "normalized_query": "_resolved_normalized_query",
+            "life_event_category": "_resolved_life_event_category",
+            "life_event_name": "_resolved_life_event_name",
+            "scenario": "_resolved_scenario",
+        }
+        for state_key, context_key in mapping.items():
+            value = state.get(state_key)
+            if value:
+                self.user_context[context_key] = value
+        if isinstance(state.get("understanding"), dict):
+            self.user_context["_resolved_understanding"] = state["understanding"]
+        if isinstance(state.get("guide_record"), dict):
+            self.user_context["_resolved_guide_record"] = state["guide_record"]
+
+        failed_nodes = {"retrieve_guide", "search_official", "fetch_pages"}
+        self.user_context["_official_search_failed"] = any(
+            isinstance(event, dict)
+            and event.get("node") in failed_nodes
+            and event.get("status") == "warning"
+            for event in (state.get("progress_events") or [])
+        )
+
+    def _mark_followup_context_ready(self) -> None:
+        if self.user_context.get("_resolved_service_item_code"):
+            self.user_context["_context_filled_from_clarification"] = True
+        if self.user_context.get("_official_search_failed"):
+            self.user_context["_skip_official_retry"] = True
+
     def _apply_reply_selection(self, reply: str) -> bool:
         response = self.last_clarification_response or ((self.last_state or {}).get("final_response") or {})
         selected = _find_quick_reply(response, reply)
@@ -250,6 +288,7 @@ class BuQiuRenSession:
             self.user_context["custom_reply"] = reply
             # 将上一轮的 missing_slots 传给后续 workflow，让 check_integrity 知道追问已回答
             self.user_context["_last_clarification_slots"] = missing_slots
+            self._mark_followup_context_ready()
             return True
         selected_context = dict(selected.get("context") or {})
         slot = selected.get("slot")
@@ -259,6 +298,30 @@ class BuQiuRenSession:
         # 将上一轮的 missing_slots 传给后续 workflow
         missing_slots = [x for x in (response.get("missing_slots") or []) if isinstance(x, dict)]
         self.user_context["_last_clarification_slots"] = missing_slots
+        # 标记：用户已补充槽位信息，后续跳过 understand_user/smart_match，直接去 retrieve_guide
+        if selected.get("slot") and response.get("answer_type") == "clarification_required":
+            self.user_context["_context_filled_from_clarification"] = True
+        self._mark_followup_context_ready()
+
+        # 处理用户审核结果：存入知识库或标记为有误
+        user_review = selected_context.get("_user_review")
+        if user_review in ("confirm", "reject") and response.get("answer_type") == "pending_user_review":
+            from app.agent.workflow import production_guide_kb, _base_service_code
+            state_data = self.last_state or {}
+            guide_record = state_data.get("guide_record") or {}
+            record = guide_record
+            if record:
+                code = record.get("service_code") or state_data.get("service_item_code")
+                city = guide_record.get("city", "")
+                save_key = f"{_base_service_code(code)}:{city}" if city else _base_service_code(code)
+                existing = production_guide_kb.get(save_key)
+                if existing:
+                    if user_review == "confirm":
+                        existing["review_status"] = "human_reviewed"
+                        existing["reviewed_at"] = datetime.now(timezone.utc).isoformat()
+                    else:
+                        existing["review_status"] = "rejected"
+                    production_guide_kb.upsert(save_key, existing)
         return True
 
     def ask(self, message: str, *, context: dict[str, Any] | None = None, new_query: bool = False) -> dict[str, Any]:
@@ -275,6 +338,7 @@ class BuQiuRenSession:
 
         state = run_buqiuren(self.raw_query, user_context=self.user_context)
         self.last_state = state
+        self._remember_resolved_state(state)
 
         resp = state.get("final_response") or {}
         if resp.get("answer_type") == "clarification_required":
@@ -293,6 +357,7 @@ class BuQiuRenSession:
         self._apply_reply_selection(reply)
         state = run_buqiuren(self.raw_query, user_context=self.user_context)
         self.last_state = state
+        self._remember_resolved_state(state)
 
         resp = state.get("final_response") or {}
         if resp.get("answer_type") == "clarification_required":
@@ -319,8 +384,8 @@ class BuQiuRenSession:
             if _response_type(self.last_state) in INTERACTIVE_RESPONSE_TYPES:
                 self._apply_reply_selection(message)
             else:
-                self.raw_query = message
-                self.user_context = {}
+                # 新问题视为新会话，保留原始问题（不清空 user_context，保留城市等已识别信息）
+                pass
 
         # Emit start event
         yield {"type": "start", "session_id": self.session_id}
@@ -348,6 +413,7 @@ class BuQiuRenSession:
             elif event["type"] == "complete":
                 state = event["state"]
                 self.last_state = state
+                self._remember_resolved_state(state)
                 resp = state.get("final_response") or {}
                 answer_type = resp.get("answer_type") or ""
 

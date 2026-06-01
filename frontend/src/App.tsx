@@ -3,9 +3,9 @@ import ChatWindow from './components/ChatWindow';
 import type { Message } from './types';
 
 const FAQ_ITEMS = [
-  { label: '深圳居住证怎么办？', value: '深圳居住证怎么办' },
-  { label: '公积金怎么提取？', value: '公积金怎么提取' },
-  { label: '公司拖欠工资怎么办？', value: '公司拖欠工资怎么办' },
+  { label: '成都新生儿医保怎么办理', value: '成都新生儿医保怎么办理' },
+  { label: '深圳居住证怎么办', value: '深圳居住证怎么办' },
+  { label: '北京公积金怎么提取', value: '北京公积金怎么提取' },
 ];
 
 export default function App() {
@@ -30,7 +30,6 @@ export default function App() {
 
   return (
     <main className="page-shell" aria-label="不求人办事流程查询">
-      {/* ── Fixed decorative layer (outside hero to avoid height confusion) ── */}
       <div className="decor-layer" aria-hidden="true">
         <div className="decor decor--dots" />
         <div className="decor decor--orb" />
@@ -39,7 +38,6 @@ export default function App() {
       </div>
 
       <section className="hero" aria-labelledby="main-title">
-        {/* ── Brand ── */}
         <header className="brand">
           <span className="brand__logo-frame" aria-hidden="true">
             <span className="brand__logo-bamboo" />
@@ -48,7 +46,7 @@ export default function App() {
           <div className="brand__text">
             <h1 className="brand__name">不求人</h1>
             <div className="brand__meta">
-              <p className="brand__slogan">办&nbsp;&nbsp;事&nbsp;&nbsp;有&nbsp;&nbsp;路&nbsp;·&nbsp;问&nbsp;&nbsp;之&nbsp;&nbsp;不&nbsp;&nbsp;难</p>
+              <p className="brand__slogan">办&nbsp;&nbsp;事&nbsp;&nbsp;有&nbsp;&nbsp;路&nbsp;·&nbsp;问&nbsp;&nbsp;答&nbsp;&nbsp;有&nbsp;&nbsp;解</p>
               <span className="brand__seal" aria-hidden="true">
                 <svg viewBox="0 0 56 96" focusable="false">
                   <rect className="brand__seal-outer" x="6" y="6" width="44" height="84" rx="17" />
@@ -60,7 +58,6 @@ export default function App() {
           </div>
         </header>
 
-        {/* ── Headline ── */}
         {!hasMessages && (
           <>
             <div className="headline-wrap">
@@ -71,7 +68,6 @@ export default function App() {
               <p className="intro">优先查找官方来源，帮你梳理条件、材料和办理入口。</p>
             </div>
 
-            {/* ── Search Card ── */}
             <form
               className="search-card"
               onSubmit={e => { e.preventDefault(); handleSend(inputValue); }}
@@ -99,7 +95,6 @@ export default function App() {
               </button>
             </form>
 
-            {/* ── FAQ ── */}
             <section className="faq-section" aria-labelledby="faq-title">
               <h3 id="faq-title" className="section-title">
                 <span />
@@ -125,7 +120,6 @@ export default function App() {
         )}
       </section>
 
-      {/* ── Chat ── */}
       <ChatWindow
         sessionId={sessionId}
         setSessionId={setSessionId}

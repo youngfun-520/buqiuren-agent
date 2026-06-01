@@ -1,7 +1,7 @@
 import type { FrontendPayload, SseNodeUpdate, SseComplete, SseError, SseStart, SseThinking } from './types';
 
 const API_BASE = import.meta.env.VITE_API_BASE || 'http://127.0.0.1:8000';
-const REQUEST_TIMEOUT_MS = 120_000;
+const REQUEST_TIMEOUT_MS = 180_000;
 
 async function postJson(path: string, body: unknown): Promise<FrontendPayload> {
   const controller = new AbortController();
@@ -18,7 +18,11 @@ async function postJson(path: string, body: unknown): Promise<FrontendPayload> {
       session_id: '',
       type: 'error',
       message: '服务暂时不可用，请稍后重试。',
-      timeline: [], quick_replies: [], card: null, actions: [], sources: [],
+      timeline: [],
+      quick_replies: [],
+      card: null,
+      actions: [],
+      sources: [],
       reasoning_steps: [],
     };
   }
@@ -33,7 +37,6 @@ export function chooseReply(sessionId: string, reply: string) {
   return postJson('/choose', { session_id: sessionId, reply });
 }
 
-// ── SSE streaming chat ──
 export async function sendChatStream(
   message: string,
   sessionId?: string | null,
@@ -91,7 +94,7 @@ export async function sendChatStream(
               onError?.(data as SseError);
             }
           } catch {
-            // skip malformed JSON
+            // ignore malformed chunks
           }
           currentEvent = '';
         }

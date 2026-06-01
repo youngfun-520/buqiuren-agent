@@ -44,7 +44,11 @@ def _build_understanding_prompt(message: str, context: dict[str, Any] | None = N
         if ctx_parts:
             ctx_str = f"\n已知上下文：{'; '.join(ctx_parts)}"
 
+    from datetime import datetime, timezone
+    now = datetime.now(timezone.utc).strftime("%Y年%m月%d日")
     return f"""你是"不求人"政务办事智能体的语义理解模块。
+
+【重要】当前日期：{now}。你在回复中引用的所有政策、规定、标准、日期等，必须以官方最新发布为准，不得引用已过时（2024年及以前）的政策信息。如果你不确定某项政策是否仍然有效，请在回复中说明"请以官方最新发布为准"。
 
 用户输入："{message}"{ctx_str}
 
