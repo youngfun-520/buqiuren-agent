@@ -257,7 +257,48 @@ def test_fallback_prompt_includes_known_user_context_and_does_not_force_slot(mon
     assert "我是个人参保（外地户籍/灵活就业）" in prompt
     assert "灵活就业" in prompt
     assert "不要重复追问已明确的信息" in prompt
+    assert "不得说缺少城市" in prompt
+    assert "公积金缴纳、缴存、提取、查询都属于公共服务" in prompt
     assert '"slot": "fallback_action"' not in prompt
+
+
+def test_scope_guard_treats_housing_fund_payment_as_public_service_when_llm_misses(monkeypatch):
+    from app.agent import fallback as fallback_mod
+
+    def fake_invoke_json(prompt, default):
+        return {"is_public_service": False, "reason": "模型误判"}
+
+    monkeypatch.setattr(fallback_mod.llm, "invoke_json", fake_invoke_json)
+
+    assert fallback_mod.is_public_service_query("吉林公积金怎么缴纳") is True
+
+
+def test_public_service_scope_gets_second_llm_check_before_unsupported(monkeypatch):
+    from app.agent import workflow as workflow_mod
+
+    def fake_scope_check(message: str):
+        assert message == "吉林公积金怎么缴纳"
+        return True
+
+    def fake_fallback(message: str, state: dict):
+        return {
+            "answer_type": "guidance_fallback",
+            "message": "已按公共服务问题继续分析。",
+            "progress_events": [],
+            "quick_replies_raw": [],
+        }
+
+    monkeypatch.setattr(workflow_mod, "is_public_service_query", fake_scope_check)
+    monkeypatch.setattr(workflow_mod, "build_intelligent_fallback", fake_fallback)
+
+    state = workflow_mod.build_response_node({
+        "raw_query": "吉林公积金怎么缴纳",
+        "service_item_code": "unknown",
+        "progress_events": [],
+        "understanding": {"is_public_service": False, "service_goal": "未识别到有效办理事项"},
+    })
+
+    assert state["final_response"]["answer_type"] == "guidance_fallback"
 
 
 def test_official_source_whitelist_supports_national_gov_domains():

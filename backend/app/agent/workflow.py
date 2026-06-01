@@ -734,9 +734,8 @@ def build_response_node(state: BuQiuRenState) -> BuQiuRenState:
     elif state.get("service_item_code") in [None, "unknown"]:
         understanding = state.get("understanding") or {}
         is_service = understanding.get("is_public_service")
-        if is_service is None:
-            from app.agent.fallback import is_public_service_query as _is_ps
-            is_service = _is_ps(state.get("raw_query") or "")
+        if is_service is None or is_service is False:
+            is_service = is_public_service_query(state.get("raw_query") or "")
         if is_service:
             from app.agent.fallback import build_intelligent_fallback as _bif
             fb = _bif(state.get("raw_query") or "", state)
